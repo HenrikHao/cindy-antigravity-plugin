@@ -1,5 +1,9 @@
 # Antigravity 插件（agy-acp）
 
+在 Cindy 打开 Antigravity 插件设置，可检测本机 CLI、从 Google 官方发布源安装及检查更新。已有自定义安装位置时，更新交给该 Antigravity CLI 的原生更新命令。
+
+从旧版升级时，请从新仓库下载 .cindy 文件并在 Cindy 导入一次，之后插件更新将使用 makecindy 下的新地址。
+
 把本机已安装、已用 Google 账号登录的 Google Antigravity 命令行（`agy`）作为 Cindy 的任务执行引擎。
 插件通过清单的 `harnesses` 字段声明一个 ACP 引擎，Cindy 在模型选择器里显示「Antigravity」，
 选中后每个任务启动一个 `agy acp` 进程，用 [Agent Client Protocol](https://agentclientprotocol.com) v1
@@ -10,7 +14,7 @@
 
 ## 安装与更新
 
-1. 从本仓库的 [Releases](https://github.com/MagicLizi/cindy-antigravity-plugin/releases) 下载最新的
+1. 从本仓库的 [Releases](https://github.com/makecindy/cindy-antigravity-plugin/releases) 下载最新的
    `agy-acp-<版本>.cindy`，在 Cindy 的插件页导入。安装确认会列出 Node 工作进程（本机权限）和
    「提供执行引擎 Antigravity」两项权限。
 2. 之后在插件设置页的宿主区域即可检查并安装新版本：清单里的 `githubRelease` 指向本仓库，

@@ -368,7 +368,10 @@ function runVersion(agyPath, options) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawnAgy(agyPath, ['--version'], { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnAgy(agyPath, ['--version'], {
+          ...options, env: { ...(options?.env || process.env), AGY_CLI_DISABLE_AUTO_UPDATE: 'true' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
     } catch (error) {
       resolve({ ok: false, detail: cleanText(error.message, 200) });
       return;

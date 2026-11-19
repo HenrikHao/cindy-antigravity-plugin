@@ -27,6 +27,7 @@
  */
 
 const readline = require('node:readline');
+const maintain = require('./cli-installer.cjs');
 const { detectAgy } = require('./resolve-agy.js');
 const { listModels } = require('./agy-models.js');
 const account = require('./agy-account.js');
@@ -41,6 +42,9 @@ function replyError(id, code, message) {
 
 let usageRead;
 const handlers = {
+  cliMaintenance(params) {
+    return maintain(params, () => reply({ jsonrpc: '2.0', method: 'progress' }));
+  },
   usage() {
     if (!usageRead) {
       const read = require('./agy-usage.js').readUsage().catch(() => null).finally(() => {

@@ -578,18 +578,25 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
   });
 
   // agy 的 logout 一调用就登出(2026-11-19 实测)：设置页只在用户确认后才发出退出请求。
-  test('the settings page shows the sign-in and asks before signing out', async () => {
+  test('the settings page applies a checked CLI version and confirms sign-out', async () => {
     class Channel {
       static all = [];
       constructor(name) {
         this.name = name;
         this.onmessage = null;
+        this.listeners = [];
+
         Channel.all.push(this);
       }
+      addEventListener(type, listener) { if (type === 'message') this.listeners.push(listener); }
       postMessage(data) {
         const copy = JSON.parse(JSON.stringify(data));
         for (const other of Channel.all) {
-          if (other !== this && other.name === this.name && other.onmessage) setTimeout(() => other.onmessage({ data: copy }), 0);
+          if (other === this || other.name !== this.name) continue;
+          setTimeout(() => {
+            other.onmessage?.({ data: copy });
+            for (const listener of other.listeners) listener({ data: copy });
+          }, 0);
         }
       }
     }
@@ -597,7 +604,7 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     const element = (id) => {
       if (!elements.has(id)) {
         const listeners = {};
-        elements.set(id, { id, textContent: '', hidden: false, disabled: false, attributes: {}, listeners,
+        elements.set(id, { id, textContent: '', hidden: false, disabled: false, attributes: {}, dataset: {}, listeners,
           setAttribute(name, value) { this.attributes[name] = value; },
           addEventListener(type, listener) { listeners[type] = listener; },
           focus() {},
@@ -606,7 +613,7 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
       return elements.get(id);
     };
     const context = vm.createContext({
-      BroadcastChannel: Channel, setTimeout, clearTimeout, setInterval, clearInterval,
+      BroadcastChannel: Channel, crypto: globalThis.crypto, setTimeout, clearTimeout, setInterval, clearInterval,
       document: { getElementById: element, documentElement: {}, visibilityState: 'visible', addEventListener() {} },
       fetch: async (url) => ({ ok: true,
         json: async () => (url === '/app-context' ? { context: { uiLocale: 'zh-CN' } } : { state: 'on' }) }),
@@ -614,12 +621,21 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     // Stands in for main.js: agy is installed and signed in.
     const main = new Channel('agy-acp');
     const requests = [];
+    const maintenance = [];
+    let version = '1.5.11';
     const account = { signedIn: true, tier: 'Google AI Pro', canSignIn: true, canSignOut: true, busy: null };
     main.onmessage = ({ data }) => {
       if (data.type === 'detect-request') {
         main.postMessage({ type: 'detect-ack', reqId: data.reqId });
         main.postMessage({ type: 'detect-result', reqId: data.reqId, snapshot: { ok: true, account,
-          result: { available: true, version: '1.5.12' }, signInRequired: false, publish: { status: 'published' }, checkedAt: 1 } });
+          result: { available: true, version }, signInRequired: false, publish: { status: 'published' }, checkedAt: 1 } });
+      }
+      if (data.type === 'cli-maintenance') {
+        maintenance.push(data);
+        const state = data.action === 'check' ? 'newer' : 'installed';
+        if (state === 'installed') version = data.version;
+        main.postMessage({ type: 'cli-ack', reqId: data.reqId });
+        main.postMessage({ type: 'cli-result', reqId: data.reqId, result: { state, version: '1.5.12' } });
       }
       if (data.type === 'account-request') {
         requests.push(data.op);
@@ -627,6 +643,8 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
         main.postMessage({ type: 'account-result', reqId: data.reqId, op: data.op, account });
       }
     };
+    context.window = context;
+    vm.runInContext(fs.readFileSync(path.join(root, 'cli-settings.js'), 'utf8'), context, { filename: 'cli-settings.js' });
     vm.runInContext(fs.readFileSync(path.join(root, 'settings.js'), 'utf8'), context, { filename: 'settings.js' });
 
     await waitFor(() => element('account-status').textContent === '已登录 · Google AI Pro', 3_000, 'signed-in status');
@@ -642,6 +660,16 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     assert.deepEqual(requests, ['status'], 'choosing Sign out only asks for confirmation');
     element('account-confirm-yes').click();
     await waitFor(() => requests.includes('logout'), 3_000, 'sign-out request after confirming');
+
+    assert.equal(element('cli-action').textContent, '检查 CLI 更新');
+    assert.deepEqual(maintenance, [], 'checking local status does not contact the release source');
+    element('cli-action').click();
+    await waitFor(() => element('cli-action').textContent === '更新到 1.5.12', 3_000, 'update offered');
+    assert.deepEqual(maintenance.map(item => item.action), ['check']);
+    element('cli-action').click();
+    await waitFor(() => element('version').textContent === '1.5.12', 3_000, 'local CLI version after refresh');
+    assert.deepEqual(maintenance.map(item => item.action), ['check', 'update']);
+    assert.equal(maintenance[1].version, '1.5.12');
   });
 
   test('listModels reads the model option agy offers, flattening its groups', async () => {

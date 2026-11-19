@@ -30,18 +30,7 @@
   .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 12px 0 0; }
   .facts dt { color: var(--text-secondary, #5c5c58); }
   .facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-  .mono, .cmd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-  .hint {
-    margin: 12px 0 0; padding: 12px;
-    border: 1px solid var(--border-default, #e4e4e0); border-radius: 12px;
-  }
-  .hint p { margin: 0; }
-  .cmd {
-    display: block; margin: 8px 0; padding: 6px 10px; border-radius: 8px;
-    background: var(--surface-chip, #efefec); color: var(--text-primary, #1a1a1a);
-    user-select: all; overflow-wrap: anywhere;
-  }
-  .sub { color: var(--text-secondary, #5c5c58); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
   .note { margin: 12px 0 0; color: var(--text-secondary, #5c5c58); }
   .note[data-tone="error"] { color: var(--error-fg, #b42318); }
   .detail { margin: 8px 0 0; color: var(--text-tertiary, #8a8a86); font-size: 12px; overflow-wrap: anywhere; }
@@ -93,12 +82,6 @@
     <dt id="label-path"></dt><dd id="path" class="mono"></dd>
   </dl>
 
-  <div class="hint" id="hint" hidden>
-    <p id="hint-text"></p>
-    <code class="cmd" id="install-command">https://antigravity.google</code>
-    <p class="sub" id="hint-after"></p>
-  </div>
-
   <section class="account" id="account" aria-labelledby="account-title" hidden>
     <div class="account-head">
       <span class="account-title" id="account-title"></span>
@@ -120,6 +103,10 @@
     <p class="note" id="account-note" hidden></p>
   </section>
 
+  <div id="cli-maintenance" class="actions" hidden>
+    <button type="button" id="cli-action"></button>
+    <span id="cli-status" role="status" aria-live="polite"></span>
+  </div>
   <p class="detail" id="detail" hidden></p>
   <p class="note" id="note" hidden></p>
 
@@ -135,6 +122,7 @@
     <h2 id="harness-usage-title"></h2><dl hidden></dl><small role="status"></small>
   </section>
   <script src="usage-view.js"></script>
+  <script src="cli-settings.js"></script>
   <script src="settings.js"></script>
 </body>
 </html>

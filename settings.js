@@ -28,9 +28,6 @@
       version: '版本',
       path: '位置',
       unknown: '未知',
-      hintNotInstalled: '这台电脑上还没有安装 Antigravity 命令行（agy）。请从这里安装：',
-      hintNotRunnable: '找到了 Antigravity 命令行（agy），但它无法运行。请从这里重新安装：',
-      hintAfter: '安装完成后点「重新检测」，不需要重新安装插件。',
       recheck: '重新检测',
       rechecking: '正在检测…',
       checkedAt: function (time) { return '上次检测：' + time; },
@@ -80,9 +77,6 @@
       version: 'Version',
       path: 'Location',
       unknown: 'Unknown',
-      hintNotInstalled: 'The Antigravity CLI (agy) isn’t installed on this computer yet. Install it from:',
-      hintNotRunnable: 'The Antigravity CLI (agy) was found but can’t run. Reinstall it from:',
-      hintAfter: 'After installing, click “Check again”. You don’t need to reinstall this plugin.',
       recheck: 'Check again',
       rechecking: 'Checking…',
       checkedAt: function (time) { return 'Last checked ' + time; },
@@ -127,6 +121,7 @@
   var locale = 'en';
   var t = STRINGS.en;
   var channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL_NAME) : null;
+  var renderMaintenance = window.createCliMaintenance(channel, requestDetect);
   var snapshot = null;
   var error = null;
   var pending = null;
@@ -189,6 +184,7 @@
 
   function render() {
     var result = snapshot && snapshot.result;
+    renderMaintenance(result, locale);
     var badge = $('badge');
     var label = t.checking;
     var tone = 'neutral';
@@ -228,9 +224,6 @@
     show('facts', hasPath || hasVersion);
 
     var needsInstall = Boolean(result && !result.available);
-    $('hint-text').textContent = result && result.reason === 'not-runnable' ? t.hintNotRunnable : t.hintNotInstalled;
-    $('hint-after').textContent = t.hintAfter;
-    show('hint', needsInstall);
 
     $('detail').textContent = (result && !result.available && result.detail) || '';
     show('detail', Boolean(needsInstall && result.detail));
