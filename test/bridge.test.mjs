@@ -673,24 +673,27 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     element('account-confirm-yes').click();
     await waitFor(() => requests.includes('logout'), 3_000, 'sign-out request after confirming');
 
-    assert.equal(element('cli-action').textContent, '检查 CLI 更新');
-    assert.deepEqual(maintenance, [], 'checking local status does not contact the release source');
-    element('cli-action').click();
-    await waitFor(() => element('cli-action').textContent === '更新到 1.5.12', 3_000, 'update offered');
+    await waitFor(() => element('cli-action').textContent === '更新到 1.5.12', 3_000, 'automatic update check');
     assert.deepEqual(maintenance.map(item => item.action), ['check']);
+    assert.equal(element('recheck').attributes['aria-label'], '检测 CLI 版本和更新');
+    element('recheck').click();
+    await waitFor(() => maintenance.length === 2 && !element('recheck').disabled, 3_000, 'manual check completed');
+    assert.deepEqual(maintenance.map(item => item.action), ['check', 'check']);
     element('cli-action').click();
     await waitFor(() => !!finishUpdate, 3_000, 'CLI update started');
     await waitFor(() => maintenanceState.active, 3_000, 'active state published');
     Channel.all = [main];
     elements.clear();
     openSettings();
-    await waitFor(() => element('cli-action').textContent === '正在更新…', 3_000, 'restored update in progress');
-    assert.equal(element('cli-action').disabled, true);
+    await waitFor(() => element('cli-status').textContent === '正在更新…', 3_000, 'restored update in progress');
+    assert.equal(element('recheck').disabled, true);
+    assert.equal(element('cli-action').hidden, true);
     finishUpdate();
     await waitFor(() => element('version').textContent === '1.5.12', 3_000, 'local CLI version after refresh');
-    assert.equal(element('cli-action').disabled, false);
-    assert.deepEqual(maintenance.map(item => item.action), ['check', 'update']);
-    assert.equal(maintenance[1].version, '1.5.12');
+    assert.equal(element('recheck').disabled, false);
+    assert.equal(element('cli-action').hidden, true);
+    assert.deepEqual(maintenance.map(item => item.action), ['check', 'check', 'update']);
+    assert.equal(maintenance[2].version, '1.5.12');
   });
 
   test('listModels reads the model option agy offers, flattening its groups', async () => {

@@ -13,7 +13,6 @@
   var RESEND_INTERVAL_MS = 500;
   var MAX_SENDS = 20;
   var RESULT_TIMEOUT_MS = 45000;
-  var VISIBLE_RECHECK_MS = 10000;
   /** How long each account request may take before the page gives up waiting for its result. */
   var ACCOUNT_DEADLINES = { status: 75000, login: 360000, cancel: 20000, logout: 75000 };
 
@@ -27,10 +26,6 @@
       checkFailed: '检测失败',
       version: '版本',
       path: '位置',
-      unknown: '未知',
-      recheck: '重新检测',
-      rechecking: '正在检测…',
-      checkedAt: function (time) { return '上次检测：' + time; },
       unsupported: '当前版本的 Cindy 还不能使用插件提供的执行引擎，请更新 Cindy。',
       notEnabled: 'Cindy 还没有启用这个执行引擎。请在插件详情中确认插件权限后再检测。',
       publishFailed: function (status) {
@@ -76,10 +71,6 @@
       checkFailed: 'Check failed',
       version: 'Version',
       path: 'Location',
-      unknown: 'Unknown',
-      recheck: 'Check again',
-      rechecking: 'Checking…',
-      checkedAt: function (time) { return 'Last checked ' + time; },
       unsupported: 'This version of Cindy can’t use engines provided by plugins yet. Update Cindy to use Antigravity.',
       notEnabled: 'Cindy hasn’t enabled this engine yet. Confirm the plugin’s permissions in its details, then check again.',
       publishFailed: function (status) {
@@ -121,11 +112,10 @@
   var locale = 'en';
   var t = STRINGS.en;
   var channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL_NAME) : null;
-  var renderMaintenance = window.createCliMaintenance(channel, requestDetect);
+  var renderMaintenance = window.createCliMaintenance(channel, requestDetect, 'recheck');
   var snapshot = null;
   var error = null;
   var pending = null;
-  var lastRequestAt = 0;
   /** Last account view from main.js: { signedIn, tier?, canSignIn, canSignOut, busy }. */
   var accountState = null;
   /** Account requests waiting for main.js, by reqId: { reqId, op, acked, sends, resend, deadline }. */
@@ -163,14 +153,6 @@
       .catch(function () { return null; });
   }
 
-  function formatTime(ms) {
-    try {
-      return new Date(ms).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
-    } catch (_) {
-      return '';
-    }
-  }
-
   function noteFor(currentError, publish) {
     if (currentError) {
       if (currentError.key === 'detectFailed') return t.detectFailed(currentError.text);
@@ -184,7 +166,7 @@
 
   function render() {
     var result = snapshot && snapshot.result;
-    renderMaintenance(result, locale);
+    renderMaintenance(error ? null : result, locale, !!pending);
     var badge = $('badge');
     var label = t.checking;
     var tone = 'neutral';
@@ -212,16 +194,12 @@
     badge.setAttribute('data-tone', tone);
 
     var hasPath = Boolean(result && result.path);
-    var hasVersion = Boolean(result && result.available);
     $('label-version').textContent = t.version;
-    $('version').textContent = (result && result.version) || t.unknown;
+    $('version').textContent = (result && result.version) || '—';
     $('label-path').textContent = t.path;
     $('path').textContent = (result && result.path) || '';
-    show('label-version', hasVersion);
-    show('version', hasVersion);
     show('label-path', hasPath);
     show('path', hasPath);
-    show('facts', hasPath || hasVersion);
 
     var needsInstall = Boolean(result && !result.available);
 
@@ -233,10 +211,6 @@
     $('note').setAttribute('data-tone', error ? 'error' : 'neutral');
     show('note', Boolean(note));
 
-    var button = $('recheck');
-    button.textContent = pending ? t.rechecking : t.recheck;
-    button.disabled = Boolean(pending);
-    $('checked-at').textContent = snapshot && snapshot.checkedAt && !pending ? t.checkedAt(formatTime(snapshot.checkedAt)) : '';
     $('foot').textContent = t.foot;
     renderAccount();
   }
@@ -387,7 +361,6 @@
 
   function requestDetect() {
     if (pending) return;
-    lastRequestAt = Date.now();
     var state = {
       reqId: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10),
       acked: false,
@@ -468,7 +441,6 @@
     };
   }
 
-  $('recheck').addEventListener('click', requestDetect);
   $('account-login').addEventListener('click', function () {
     confirmingLogout = false;
     requestAccount('login');
@@ -488,9 +460,6 @@
   $('account-confirm-yes').addEventListener('click', function () {
     confirmingLogout = false;
     requestAccount('logout');
-  });
-  document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && Date.now() - lastRequestAt > VISIBLE_RECHECK_MS) requestDetect();
   });
 
   loadLocale().then(requestDetect);
