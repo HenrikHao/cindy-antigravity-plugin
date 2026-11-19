@@ -453,7 +453,7 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     page.onmessage = (event) => received.push(event.data);
     page.postMessage({ type: 'detect-request', reqId: 'r1' });
     await waitFor(() => puts.some((body) => body.harnesses[0].modes), 3_000, 'models and modes published');
-    assert.deepEqual(puts.at(-1), { harnesses: [{ id: 'agy', available: true, version: '1.5.12',
+    assert.deepEqual(puts.at(-1), { harnesses: [{ id: 'agy', available: true, reportsUsage: true, version: '1.5.12',
       models: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' }],
       modes: ['default', 'acceptEdits', 'auto', 'plan'], defaultMode: 'default' }] });
     assert.equal(calls('listModels').length, 2);
@@ -567,7 +567,7 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     finishFirstListing();
     await waitFor(() => puts.length && puts.at(-1).models, 3_000, 'models read again after the sign-in');
     assert.ok(puts.every((entry) => entry.available), 'the late listing never marks the engine signed out');
-    assert.deepEqual(puts.at(-1), { id: 'agy', available: true, version: '1.5.12', models: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon' }] });
+    assert.deepEqual(puts.at(-1), { id: 'agy', available: true, reportsUsage: true, version: '1.5.12', models: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon' }] });
 
     page.postMessage({ type: 'account-request', reqId: 'a2', op: 'logout' });
     await waitFor(() => result('a2'), 3_000, 'sign-out result');
@@ -699,4 +699,19 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     assert.equal(bridge.stdout.bytes().length, 0);
     assert.match(bridge.stderr.text(), /^\[agy-acp\] [^\n]*https:\/\/antigravity\.google[^\n]*\n$/);
   });
+});
+
+test('native /usage preserves exhausted groups and ignores model turns and disabled buckets', async () => {
+  const { usageFromReport } = await import('../agy-usage.js');
+  const command = { name: 'usage', data: { groups: [{ name: 'Gemini', buckets: [
+    { window: 'weekly', remaining_fraction: 0, reset_time: '2030-01-01T00:00:00Z' },
+    { window: '5h', remaining_fraction: 0.5, disabled: true },
+    { window: 'unreported', remaining_fraction: null },
+  ] }, { name: 'Claude/GPT', buckets: [{ window: '5h', remaining_fraction: 1 }] }] } };
+  const usage = usageFromReport({ status: 'SUCCESS', num_turns: 0, command });
+  assert.deepEqual(usage.windows, [
+    { label: 'Gemini · weekly', remainingPercent: 0, resetsAt: Date.UTC(2030, 0, 1) },
+    { label: 'Claude/GPT · 5h', remainingPercent: 100 },
+  ]);
+  assert.equal(usageFromReport({ status: 'SUCCESS', num_turns: 1, command }), null);
 });

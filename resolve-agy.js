@@ -26,7 +26,7 @@ const SAFE_ARG = /^[A-Za-z0-9._=-]+$/;
  */
 const SESSION_SETTINGS = JSON.stringify({ useG1Credits: false });
 /** Arguments outside SAFE_ARG that are still constants of this package. */
-const CONSTANT_ARGS = new Set([SESSION_SETTINGS]);
+const CONSTANT_ARGS = new Set([SESSION_SETTINGS, '/usage']);
 // Through a cmd.exe shim a constant is passed quoted (cmdArg); it must hold nothing cmd.exe expands.
 for (const arg of CONSTANT_ARGS) {
   if (/[%!^&|<>\\\r\n]/.test(arg)) throw new Error('Constant agy argument is not safe for cmd.exe');

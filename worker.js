@@ -39,7 +39,17 @@ function replyError(id, code, message) {
   reply({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
+let usageRead;
 const handlers = {
+  usage() {
+    if (!usageRead) {
+      const read = require('./agy-usage.js').readUsage().catch(() => null).finally(() => {
+        if (usageRead === read) usageRead = undefined;
+      });
+      usageRead = read;
+    }
+    return usageRead;
+  },
   async detect(params) {
     const locale = params && typeof params.locale === 'string' ? params.locale : undefined;
     return detectAgy({ locale });
@@ -52,6 +62,7 @@ const handlers = {
     }));
   },
   async login() {
+    usageRead = undefined;
     return account.login(undefined, () => {
       reply({ jsonrpc: '2.0', method: 'progress', params: { stage: 'waiting-for-browser' } });
     });
@@ -60,6 +71,7 @@ const handlers = {
     return account.cancelLogin();
   },
   async logout() {
+    usageRead = undefined;
     return account.logout();
   },
   async listModels(params) {

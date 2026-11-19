@@ -57,6 +57,47 @@
   var inflight = null;
   var seenRequests = [];
   var channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL_NAME) : null;
+  // Coalesce settings checks. Drop a read
+  // from the previous account if sign-in or credentials change mid-request.
+  let usage = null;
+  let usageWanted = false;
+  let usageCheck = 0;
+  let usageGeneration = 0;
+  let usagePending = null;
+  function announceUsage(checking = false) {
+    if (channel) channel.postMessage({ type: 'harness-usage', usage, checking });
+  }
+  function clearUsage() {
+    usageGeneration++;
+    usageCheck = 0;
+    usagePending = null;
+    usage = null;
+    announceUsage();
+  }
+  function refreshUsage() {
+    if (!usageAvailable()) {
+      usageWanted = true;
+      return Promise.resolve();
+    }
+    usageWanted = false;
+    if (usagePending) return usagePending;
+    if (Date.now() - usageCheck < 60000) return Promise.resolve();
+    usageCheck = Date.now();
+    const generation = usageGeneration;
+    usagePending = (async () => {
+      let next = null;
+      try {
+        const response = await cindy.node.request({ method: 'usage', params: {}, timeoutMs: 26000 });
+        if (response?.ok && (response.result?.windows?.length || response.result?.balances?.length)) next = response.result;
+      } catch { /* Absence of billing data does not affect the engine. */ }
+      if (generation !== usageGeneration || !usageAvailable()) return;
+      usage = next;
+      announceUsage();
+
+    })().finally(() => { if (generation === usageGeneration) usagePending = null; });
+    return usagePending;
+  }
+  function usageAvailable() { return !!(lastResult && lastResult.available && !signInRequired); }
 
   /**
    * agy's model list and working modes (published with the engine status, shown by Cindy like a
@@ -156,6 +197,8 @@
   /** Only metadata leaves the plugin: never the executable path or a command. */
   function harnessEntry(result) {
     var entry = { id: HARNESS_ID, available: result.available === true && !signInRequired };
+    if (entry.available) entry.reportsUsage = true;
+
     if (result.available === true && signInRequired) {
       entry.reason = 'not-signed-in';
       entry.message = SIGN_IN_MESSAGES[locale] || SIGN_IN_MESSAGES.en;
@@ -234,6 +277,8 @@
     else if (name) account.tier = name;
     var changed = signInRequired !== !signedIn;
     signInRequired = !signedIn;
+    if (!signedIn) clearUsage();
+    else if (changed) void refreshUsage();
     if (!changed || !lastResult || !lastResult.available) return Promise.resolve();
     return publish(lastResult).then(function (published) { lastPublish = published; });
   }
@@ -269,6 +314,8 @@
         }
         lastError = null;
         lastResult = sanitizeResult(response.result);
+        if (!lastResult.available) clearUsage();
+        else if (usageWanted) void refreshUsage();
         return publish(lastResult).then(function (published) {
           lastPublish = published;
           return snapshot();
@@ -444,6 +491,11 @@
     channel.onmessage = function (event) {
       var data = event && event.data;
       if (!data || typeof data !== 'object') return;
+      if (data.type === 'harness-usage-request') {
+        announceUsage(usageAvailable() && !usage && (!usageCheck || !!usagePending));
+        void refreshUsage();
+        return;
+      }
       if (typeof data.reqId !== 'string' || data.reqId.length > 64) return;
       if (data.type === 'detect-request') {
         channel.postMessage({ type: 'detect-ack', reqId: data.reqId });
