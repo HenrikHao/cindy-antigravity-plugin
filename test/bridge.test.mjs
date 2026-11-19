@@ -578,7 +578,7 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
   });
 
   // agy 的 logout 一调用就登出(2026-11-19 实测)：设置页只在用户确认后才发出退出请求。
-  test('the settings page applies a checked CLI version and confirms sign-out', async () => {
+  test('the settings page resumes a CLI update after reopening and confirms sign-out', async () => {
     class Channel {
       static all = [];
       constructor(name) {
@@ -623,6 +623,8 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     const requests = [];
     const maintenance = [];
     let version = '1.5.11';
+    let maintenanceState = { type: 'cli-state' };
+    let finishUpdate;
     const account = { signedIn: true, tier: 'Google AI Pro', canSignIn: true, canSignOut: true, busy: null };
     main.onmessage = ({ data }) => {
       if (data.type === 'detect-request') {
@@ -630,12 +632,21 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
         main.postMessage({ type: 'detect-result', reqId: data.reqId, snapshot: { ok: true, account,
           result: { available: true, version }, signInRequired: false, publish: { status: 'published' }, checkedAt: 1 } });
       }
+      if (data.type === 'cli-state-request') main.postMessage(maintenanceState);
       if (data.type === 'cli-maintenance') {
         maintenance.push(data);
-        const state = data.action === 'check' ? 'newer' : 'installed';
-        if (state === 'installed') version = data.version;
-        main.postMessage({ type: 'cli-ack', reqId: data.reqId });
-        main.postMessage({ type: 'cli-result', reqId: data.reqId, result: { state, version: '1.5.12' } });
+        const status = { type: 'cli-state', reqId: data.reqId, action: data.action };
+        if (data.action === 'check') {
+          maintenanceState = { ...status, result: { state: 'newer', version: '1.5.12' } };
+        } else {
+          maintenanceState = { ...status, active: true };
+          finishUpdate = () => {
+            version = data.version;
+            maintenanceState = { ...status, result: { state: 'installed', version } };
+            main.postMessage(maintenanceState);
+          };
+        }
+        main.postMessage(maintenanceState);
       }
       if (data.type === 'account-request') {
         requests.push(data.op);
@@ -645,7 +656,8 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     };
     context.window = context;
     vm.runInContext(fs.readFileSync(path.join(root, 'cli-settings.js'), 'utf8'), context, { filename: 'cli-settings.js' });
-    vm.runInContext(fs.readFileSync(path.join(root, 'settings.js'), 'utf8'), context, { filename: 'settings.js' });
+    const openSettings = () => vm.runInContext(fs.readFileSync(path.join(root, 'settings.js'), 'utf8'), context, { filename: 'settings.js' });
+    openSettings();
 
     await waitFor(() => element('account-status').textContent === '已登录 · Google AI Pro', 3_000, 'signed-in status');
     assert.equal(element('badge').textContent, '可以使用');
@@ -667,7 +679,16 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     await waitFor(() => element('cli-action').textContent === '更新到 1.5.12', 3_000, 'update offered');
     assert.deepEqual(maintenance.map(item => item.action), ['check']);
     element('cli-action').click();
+    await waitFor(() => !!finishUpdate, 3_000, 'CLI update started');
+    await waitFor(() => maintenanceState.active, 3_000, 'active state published');
+    Channel.all = [main];
+    elements.clear();
+    openSettings();
+    await waitFor(() => element('cli-action').textContent === '正在更新…', 3_000, 'restored update in progress');
+    assert.equal(element('cli-action').disabled, true);
+    finishUpdate();
     await waitFor(() => element('version').textContent === '1.5.12', 3_000, 'local CLI version after refresh');
+    assert.equal(element('cli-action').disabled, false);
     assert.deepEqual(maintenance.map(item => item.action), ['check', 'update']);
     assert.equal(maintenance[1].version, '1.5.12');
   });
