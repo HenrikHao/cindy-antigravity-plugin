@@ -21,6 +21,9 @@
  *     or after 5 minutes. Sends a `progress` notification every 10 s meanwhile (keeps Cindy's
  *     request alive).
  *   cancelLogin() -> { ok: true, cancelled }
+ *   cliMaintenance({ action, version?, op? }) -> { state, version } | { error }
+ *     Checks, installs or updates agy (see cli-installer.cjs). While installing it sends `progress`
+ *     keep-alives and `cli-progress` { op, events } notifications for the settings page.
  *   logout() -> { ok: true } | { ok: false, error, detail? }
  *     Signs agy out; the settings page only asks after the user confirmed.
  *   Sign-in stays with agy (see agy-account.js); the plugin never sees credentials or the email.
@@ -43,7 +46,7 @@ function replyError(id, code, message) {
 let usageRead;
 const handlers = {
   cliMaintenance(params) {
-    return maintain(params, () => reply({ jsonrpc: '2.0', method: 'progress' }));
+    return maintain(params, (method, data) => reply({ jsonrpc: '2.0', method, ...(data ? { params: data } : {}) }));
   },
   usage() {
     if (!usageRead) {
