@@ -194,10 +194,26 @@
     return typeof value === 'string' && value ? value.slice(0, max) : undefined;
   }
 
+  /**
+   * agy-acp.js can run a task whose files are on another computer from this agy version on
+   * (remote-workspace.js checks the same version again before it starts agy).
+   */
+  var REMOTE_WORKSPACE_MIN_VERSION = [1, 5, 13];
+  function supportsRemoteWorkspace(version) {
+    var match = /(\d+)\.(\d+)\.(\d+)/.exec(typeof version === 'string' ? version : '');
+    if (!match) return false;
+    for (var index = 0; index < 3; index += 1) {
+      var part = Number(match[index + 1]);
+      if (part !== REMOTE_WORKSPACE_MIN_VERSION[index]) return part > REMOTE_WORKSPACE_MIN_VERSION[index];
+    }
+    return true;
+  }
+
   /** Only metadata leaves the plugin: never the executable path or a command. */
   function harnessEntry(result) {
     var entry = { id: HARNESS_ID, available: result.available === true && !signInRequired };
     if (entry.available) entry.reportsUsage = true;
+    if (entry.available && supportsRemoteWorkspace(result.version)) entry.remoteWorkspace = true;
 
     if (result.available === true && signInRequired) {
       entry.reason = 'not-signed-in';

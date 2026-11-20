@@ -11,10 +11,16 @@
  * When Cindy closes stdin, agy's stdin is closed and agy exits on its own; when agy
  * exits, this process exits with the same code. When this process is asked to stop,
  * agy (and on Windows its whole process tree) is stopped first so nothing is orphaned.
+ *
+ * Started with `--cindy-remote-workspace` (the task's files and commands are on another
+ * computer), the session runs under an agent without Antigravity's own file and command
+ * tools, and the ACP messages are relayed by remote-workspace.js instead of byte for byte.
+ * Nothing in the user's Antigravity settings is changed.
  */
 
 const os = require('node:os');
-const { ACP_ARGS, resolveAgy, spawnAgy, killTree } = require('./resolve-agy.js');
+const { ACP_ARGS, detectAgy, resolveAgy, spawnAgy, killTree } = require('./resolve-agy.js');
+const remoteWorkspace = require('./remote-workspace.js');
 
 /** agy normally exits right after stdin closes; force it if it lingers. */
 const STDIN_END_GRACE_MS = 5_000;
@@ -156,12 +162,46 @@ function run(agyPath) {
   });
 }
 
-const agyPath = resolveAgy();
-if (agyPath) {
-  run(agyPath);
+const NOT_FOUND_MESSAGE =
+  '[agy-acp] The Antigravity CLI (agy) was not found on this computer. Install it from https://antigravity.google, then start the task again.';
+
+/**
+ * The project is on another computer: only an agy that is known to honour the restricted agent
+ * may run the task. Any doubt ends here, before agy sees a single message.
+ */
+async function runRemoteWorkspace() {
+  const found = await detectAgy();
+  if (!found.path) {
+    exitAfterStderr(NOT_FOUND_MESSAGE, NOT_FOUND_EXIT_CODE);
+    return;
+  }
+  if (!found.available) {
+    exitAfterStderr(`[agy-acp] The Antigravity CLI at ${found.path} could not be run (${found.detail || 'unknown reason'}).`, NOT_FOUND_EXIT_CODE);
+    return;
+  }
+  if (!remoteWorkspace.versionSupported(found.version)) {
+    exitAfterStderr(
+      `[agy-acp] Antigravity ${found.version || '(unknown version)'} cannot run a task whose files are on another computer; it needs ${remoteWorkspace.MIN_VERSION.join('.')} or later. It was not started.`,
+      remoteWorkspace.REMOTE_WORKSPACE_EXIT_CODE,
+    );
+    return;
+  }
+  remoteWorkspace.startRemoteWorkspace(found.path, {
+    acpArgs: ACP_ARGS,
+    spawnAgy,
+    killTree,
+    exitAfterStderr,
+    describe,
+    exitCodeFor,
+    notFoundExitCode: NOT_FOUND_EXIT_CODE,
+    timings: { stdinEndGrace: STDIN_END_GRACE_MS, signalGrace: SIGNAL_GRACE_MS, flush: FLUSH_TIMEOUT_MS },
+  });
+}
+
+if (remoteWorkspace.isRemoteWorkspaceLaunch(process.argv)) {
+  runRemoteWorkspace();
 } else {
-  exitAfterStderr(
-    '[agy-acp] The Antigravity CLI (agy) was not found on this computer. Install it from https://antigravity.google, then start the task again.',
-    NOT_FOUND_EXIT_CODE,
-  );
+  const agyPath = resolveAgy();
+  if (agyPath) run(agyPath);
+  else exitAfterStderr(NOT_FOUND_MESSAGE, NOT_FOUND_EXIT_CODE);
 }

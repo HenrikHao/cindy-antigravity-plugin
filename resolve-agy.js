@@ -302,6 +302,8 @@ function spawnAgy(agyPath, args, options) {
     stdio: (options && options.stdio) || 'pipe',
     windowsHide: true,
   };
+  // A working directory chosen by this package (never by a caller outside it).
+  if (options && typeof options.cwd === 'string' && options.cwd) base.cwd = options.cwd;
   if (ctx.win && /\.(?:cmd|bat)$/i.test(agyPath)) {
     if (/["%!\r\n]/.test(agyPath)) {
       const error = new Error('The agy path contains characters that cmd.exe cannot run safely');

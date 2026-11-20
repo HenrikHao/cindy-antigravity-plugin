@@ -35,8 +35,62 @@ if (args.length === 1 && args[0] === '--version') {
     process.stderr.write('agy requires Node.js >= 24.9.0\\n');
     process.exit(1);
   }
-  process.stdout.write('agy 0.2.2\\n');
+  process.stdout.write('agy ' + (process.env.FAKE_AGY_VERSION || '0.2.2') + '\\n');
   process.exit(0);
+}
+// Remote-workspace mode: the session process runs under the restricted agent of its working directory.
+const REMOTE_ARGS = ${JSON.stringify(JSON.stringify([...EXPECTED_ACP_ARGS, '--agent', 'cindy-remote']))};
+if (JSON.stringify(args) === REMOTE_ARGS) {
+  const record = (extra) => fs.writeFileSync(process.env.FAKE_AGY_LAUNCHFILE, JSON.stringify(Object.assign({
+    args, cwd: process.cwd(), files: fs.readdirSync(process.cwd()),
+    definition: fs.readFileSync('.agents/agents/cindy-remote.md', 'utf8'),
+  }, extra)));
+  record({});
+  if (process.env.FAKE_AGY_PIDFILE) fs.writeFileSync(process.env.FAKE_AGY_PIDFILE, String(process.pid));
+  const send = (message) => process.stdout.write(JSON.stringify(Object.assign({ jsonrpc: '2.0' }, message)) + '\\n');
+  const MCP_CALL = { toolCallId: 'call-1', name: 'call_mcp_tool', kind: 'execute', title: 'MCP Tool Bash',
+    args: { Arguments: { command: 'ls' }, ServerName: 'cindy_exec', ToolName: 'Bash' },
+    rawInput: { Arguments: { command: 'ls' }, ServerName: 'cindy_exec', ToolName: 'Bash' } };
+  // In a resumed session agy 1.5.13 reports the same call as a tool of its own name, with a summary it adds.
+  const DIRECT_CALL = { toolCallId: 'call-1', name: 'mcp_cindy_exec_Bash', kind: 'other', title: 'Run mcp_cindy_exec_Bash',
+    args: { command: 'ls', toolSummary: 'List files' }, rawInput: { command: 'ls', toolSummary: 'List files' } };
+  let call = MCP_CALL;
+  let promptId = null;
+  let lines = '';
+  process.stdin.on('data', (chunk) => {
+    lines += chunk.toString('utf8');
+    let index;
+    while ((index = lines.indexOf('\\n')) !== -1) {
+      const line = lines.slice(0, index);
+      lines = lines.slice(index + 1);
+      if (!line.trim()) continue;
+      const message = JSON.parse(line);
+      if (message.method === 'initialize') {
+        send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [] } });
+      } else if (message.method === 'session/new' || message.method === 'session/resume') {
+        record({ method: message.method, session: message.params });
+        if (message.method === 'session/resume') call = DIRECT_CALL;
+        send({ id: message.id, result: { sessionId: 'sess-1', configOptions: [] } });
+      } else if (message.method === 'session/prompt' && process.env.FAKE_AGY_SCRIPT === 'native') {
+        // An agy that ignored the agent's tool list: one of its own tools runs, and the turn stays open.
+        send({ method: 'session/update', params: { sessionId: 'sess-1', update: { sessionUpdate: 'tool_call', toolCallId: 'call-n',
+          name: 'write_to_file', kind: 'edit', title: 'note.txt', status: 'in_progress' } } });
+      } else if (message.method === 'session/prompt') {
+        promptId = message.id;
+        send({ id: 'perm-1', method: 'session/request_permission', params: { sessionId: 'sess-1',
+          toolCall: Object.assign({ sessionUpdate: 'tool_call', status: 'pending' }, call),
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }] } });
+      } else if (message.id === 'perm-1') {
+        send({ method: 'session/update', params: { sessionId: 'sess-1', update: Object.assign({ sessionUpdate: 'tool_call', status: 'in_progress' }, call) } });
+        // A later update without the arguments still carries agy's own name for the call.
+        send({ method: 'session/update', params: { sessionId: 'sess-1', update: { sessionUpdate: 'tool_call_update', toolCallId: 'call-1',
+          kind: call.kind, title: call.title, status: 'completed', rawOutput: 'a.txt\\n' } } });
+        send({ id: promptId, result: { stopReason: 'end_turn', answered: message.result.outcome.optionId } });
+      }
+    }
+  });
+  process.stdin.on('end', () => process.stdout.write('', () => process.exit(0)));
+  return;
 }
 // The arguments Cindy's entry must use: session settings (no paid credits), ACP, no telemetry.
 if (JSON.stringify(args) !== ${JSON.stringify(JSON.stringify(EXPECTED_ACP_ARGS))}) {
@@ -222,8 +276,8 @@ function startWorker(env) {
   };
 }
 
-function startBridge(env) {
-  const child = spawn(process.execPath, [path.join(root, 'agy-acp.js')], { env, cwd: os.tmpdir(), stdio: 'pipe' });
+function startBridge(env, args = []) {
+  const child = spawn(process.execPath, [path.join(root, 'agy-acp.js'), ...args], { env, cwd: os.tmpdir(), stdio: 'pipe' });
   return { child, stdout: collect(child.stdout), stderr: collect(child.stderr), closed: waitClose(child) };
 }
 
@@ -288,6 +342,178 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     assert.ok(bridge.stdout.bytes().equals(EXPECTED_RESPONSE), 'no extra bytes on stdout');
     assert.match(bridge.stderr.text(), /fake-agy: ready/);
     await waitFor(() => !isAlive(pid), 3_000, 'fake agy to exit');
+  });
+
+  /**
+   * Remote-workspace mode (`--cindy-remote-workspace`): the task's files and commands are on another
+   * computer, so Antigravity's own file and command tools would act on the wrong one.
+   * Why these tests: the mode replaces the byte-for-byte relay with one that reads ACP, starts agy
+   * twice and rewrites what Cindy sees; the existing relay tests cover none of it. Each case below is
+   * the smallest input for one promise of the mode: tools only through Cindy, no session without them,
+   * a stop when agy uses a tool of its own, and no start on an agy that was never checked.
+   */
+  const remoteSession = (t, extraEnv = {}) => {
+    const launchFile = path.join(os.tmpdir(), `agy-acp-launch-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+    t.after(() => fs.rmSync(launchFile, { force: true }));
+    const fixture = makeFixture(t, { extraEnv: { FAKE_AGY_VERSION: '1.5.13', FAKE_AGY_LAUNCHFILE: launchFile, ...extraEnv } });
+    const bridge = startBridge(fixture.env, ['--cindy-remote-workspace']);
+    // A failing case must not leave the entry (and the fake agy behind it) running.
+    t.after(() => bridge.child.kill());
+    const messages = () => bridge.stdout.text().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const send = (message) => bridge.child.stdin.write(JSON.stringify(message) + '\n');
+    const reply = async (id, what) => {
+      await waitFor(() => messages().some((m) => m.id === id && !m.method), 8_000, what);
+      return messages().find((m) => m.id === id && !m.method);
+    };
+    const server = (name) => ({ type: 'http', name, url: `http://127.0.0.1:4711/mcp/${name}`, headers: [{ name: 'Authorization', value: 'Bearer task-secret' }] });
+    return { launchFile, fixture, bridge, messages, send, reply, server };
+  };
+
+  test('remote-workspace mode runs the session under an agent that only has Cindy’s tools', async (t) => {
+    const { launchFile, bridge, messages, send, reply, server } = remoteSession(t);
+    bridge.child.stdin.write(INITIALIZE);
+    const init = await reply(0, 'initialize answer');
+    // agy connects to HTTP MCP servers without declaring it; Cindy hands its tools only to an agent that does.
+    assert.deepEqual(init.result.agentCapabilities.mcpCapabilities, { http: true });
+    assert.equal(init.result.agentInfo.title, '假 AGY ✓');
+
+    send({ jsonrpc: '2.0', id: 1, method: 'session/new', params: { cwd: '/shadow/p',
+      mcpServers: [server('cindy_exec'), server('cindy'), server('not a name'), { name: 'local', command: 'tool', args: [], env: [] }] } });
+    assert.deepEqual((await reply(1, 'session/new answer')).result, { sessionId: 'sess-1', configOptions: [] });
+    const launch = JSON.parse(fs.readFileSync(launchFile, 'utf8'));
+    assert.deepEqual(launch.args.slice(-2), ['--agent', 'cindy-remote']);
+    assert.deepEqual(launch.files, ['.agents'], 'agy runs in a directory holding only the agent definition');
+    assert.ok(!samePath(launch.cwd, os.tmpdir()), 'not the shared temp folder');
+    // One harmless tool of agy's own; the servers by name only. Their address and the task token stay in session/new.
+    assert.match(launch.definition, /^tools:\n  - search_web\nmcpServers:\n  - name: cindy_exec\n  - name: cindy\n---$/m);
+    assert.doesNotMatch(launch.definition, /task-secret|127\.0\.0\.1/);
+    assert.deepEqual(launch.session, { cwd: '/shadow/p', mcpServers: [server('cindy_exec'), server('cindy')] });
+
+    send({ jsonrpc: '2.0', id: 2, method: 'session/prompt', params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'list the files' }] } });
+    await waitFor(() => messages().some((m) => m.method === 'session/request_permission'), 8_000, 'permission request');
+    const permission = messages().find((m) => m.method === 'session/request_permission');
+    // agy reports its generic MCP caller; Cindy must see (and check) its own Bash tool with the real arguments.
+    const asked = permission.params.toolCall;
+    assert.deepEqual({ title: asked.title, kind: asked.kind, rawInput: asked.rawInput, args: asked.args },
+      { title: 'Bash', kind: 'execute', rawInput: { command: 'ls' }, args: undefined });
+    send({ jsonrpc: '2.0', id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+    assert.deepEqual((await reply(2, 'prompt answer')).result, { stopReason: 'end_turn', answered: 'allow' });
+    const updates = messages().filter((m) => m.method === 'session/update').map((m) => m.params.update);
+    assert.deepEqual(updates.map((update) => [update.sessionUpdate, update.title, update.kind]),
+      [['tool_call', 'Bash', 'execute'], ['tool_call_update', 'Bash', 'execute']]);
+    assert.deepEqual(updates[0].rawInput, { command: 'ls' });
+
+    bridge.child.stdin.end();
+    assert.equal((await bridge.closed).code, 0);
+    assert.ok(!fs.existsSync(launch.cwd), 'the private directory is removed when the task ends');
+  });
+
+  // Why: a task is resumed every time it is reopened (and after Cindy releases an idle connection). agy then
+  // reports Cindy's tools in another form than in a new session; left as it is, Cindy would show
+  // "Run mcp_cindy_exec_Bash" and could not match an approved command to the one that runs.
+  test('remote-workspace mode names Cindy’s tools the same way in a resumed session', async (t) => {
+    const { launchFile, bridge, messages, send, reply, server } = remoteSession(t);
+    bridge.child.stdin.write(INITIALIZE);
+    await reply(0, 'initialize answer');
+    send({ jsonrpc: '2.0', id: 1, method: 'session/resume', params: { sessionId: 'sess-1', cwd: '/shadow/p', mcpServers: [server('cindy_exec')] } });
+    await reply(1, 'session/resume answer');
+    const launch = JSON.parse(fs.readFileSync(launchFile, 'utf8'));
+    assert.equal(launch.method, 'session/resume');
+    assert.deepEqual(launch.args.slice(-2), ['--agent', 'cindy-remote'], 'a resumed session runs under the restricted agent too');
+
+    send({ jsonrpc: '2.0', id: 2, method: 'session/prompt', params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'list the files' }] } });
+    await waitFor(() => messages().some((m) => m.method === 'session/request_permission'), 8_000, 'permission request');
+    const permission = messages().find((m) => m.method === 'session/request_permission');
+    const asked = permission.params.toolCall;
+    assert.deepEqual({ title: asked.title, kind: asked.kind, rawInput: asked.rawInput, args: asked.args },
+      { title: 'Bash', kind: 'execute', rawInput: { command: 'ls' }, args: undefined });
+    send({ jsonrpc: '2.0', id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+    await reply(2, 'prompt answer');
+    const updates = messages().filter((m) => m.method === 'session/update').map((m) => m.params.update);
+    assert.deepEqual(updates.map((update) => [update.sessionUpdate, update.title, update.kind]),
+      [['tool_call', 'Bash', 'execute'], ['tool_call_update', 'Bash', 'execute']]);
+    bridge.child.stdin.end();
+    assert.equal((await bridge.closed).code, 0);
+  });
+
+  test('remote-workspace mode does not start a session without Cindy’s file and command tools', async (t) => {
+    const { launchFile, bridge, send, reply, server } = remoteSession(t);
+    bridge.child.stdin.write(INITIALIZE);
+    await reply(0, 'initialize answer');
+    send({ jsonrpc: '2.0', id: 1, method: 'session/new', params: { cwd: '/shadow/p', mcpServers: [server('cindy')] } });
+    const refused = await reply(1, 'session/new answer');
+    assert.equal(refused.error.code, -32602);
+    assert.match(refused.error.message, /cindy_exec/);
+    assert.ok(!fs.existsSync(launchFile), 'the session process was never started');
+    bridge.child.stdin.end();
+    assert.equal((await bridge.closed).code, 0);
+  });
+
+  test('remote-workspace mode stops the task when Antigravity uses a tool of its own', async (t) => {
+    const { fixture, bridge, messages, send, reply, server } = remoteSession(t, { FAKE_AGY_SCRIPT: 'native' });
+    bridge.child.stdin.write(INITIALIZE);
+    await reply(0, 'initialize answer');
+    send({ jsonrpc: '2.0', id: 1, method: 'session/new', params: { cwd: '/shadow/p', mcpServers: [server('cindy_exec')] } });
+    await reply(1, 'session/new answer');
+    send({ jsonrpc: '2.0', id: 2, method: 'session/prompt', params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'write a note' }] } });
+    // Nothing else ends this turn: the entry has to stop the task by itself.
+    const closed = await Promise.race([bridge.closed, new Promise((resolve) => setTimeout(() => resolve(null), 8_000))]);
+    assert.ok(closed, 'the entry ended the task');
+    assert.equal(closed.code, 78);
+    assert.match(bridge.stderr.text(), /its own tool "write_to_file"/);
+    // The user is told why the task ended; the call is not passed on as work that was done.
+    const updates = messages().filter((m) => m.method === 'session/update').map((m) => m.params.update);
+    assert.deepEqual(updates.map((update) => update.sessionUpdate), ['agent_message_chunk']);
+    const pid = readPid(fixture.pidFile);
+    assert.ok(pid, 'the session process had started');
+    await waitFor(() => !isAlive(pid), 4_000, 'fake agy to be stopped');
+  });
+
+  test('remote-workspace mode refuses an Antigravity CLI older than the version it was checked with', async (t) => {
+    const fixture = makeFixture(t); // the fake reports 0.2.2
+    const bridge = startBridge(fixture.env, ['--cindy-remote-workspace']);
+    const { code } = await bridge.closed;
+    assert.equal(code, 78);
+    assert.equal(bridge.stdout.bytes().length, 0);
+    assert.match(bridge.stderr.text(), /needs 1\.5\.13 or later/);
+    assert.equal(readPid(fixture.pidFile), null, 'agy was never started for ACP');
+  });
+
+  // Why: Cindy shows 「允许被远程调用」 only for an engine that reports remoteWorkspace. main.js runs in the
+  // plugin page and cannot load remote-workspace.js, so it carries its own copy of the version check; if
+  // the two drift apart the switch is offered for an agy the entry then refuses (or never offered).
+  test('main.js offers the engine to other computers exactly from the agy version the entry accepts', async () => {
+    const { versionSupported } = (await import(pathToFileURL(path.join(root, 'remote-workspace.js')).href)).default;
+    const published = async (version) => {
+      const puts = [];
+      class Channel { constructor() { this.onmessage = null; } postMessage() {} }
+      const context = vm.createContext({
+        BroadcastChannel: Channel,
+        setTimeout,
+        clearTimeout,
+        cindy: {
+          request: async () => ({ ok: true, context: { locale: 'en', uiLocale: 'en' } }),
+          node: {
+            request: async (request) => (request.method === 'detect'
+              ? { ok: true, result: { available: true, version } }
+              : { ok: true, result: { supported: true, sessionId: 'probe-1', models: [], modes: [] } }),
+          },
+          onHostMessage: () => () => {},
+        },
+        fetch: async (url, init) => {
+          if (url === '/kv' && !init) return { ok: true, json: async () => ({}) };
+          if (url === '/harnesses') puts.push(JSON.parse(init.body));
+          return { ok: true, status: 204 };
+        },
+      });
+      vm.runInContext(fs.readFileSync(path.join(root, 'main.js'), 'utf8'), context, { filename: 'main.js' });
+      await waitFor(() => puts.some((body) => body.harnesses[0].available), 3_000, `engine published for ${version}`);
+      return puts.findLast((body) => body.harnesses[0].available).harnesses[0];
+    };
+    assert.deepEqual(['1.5.12', '1.5.13', '1.6.0', '2.0.1'].map(versionSupported), [false, true, true, true]);
+    for (const version of ['1.5.12', '1.5.13', '1.6.0', '2.0.1']) {
+      assert.equal((await published(version)).remoteWorkspace === true, versionSupported(version), version);
+    }
   });
 
   test('stopping agy-acp leaves no agy process behind', async (t) => {
