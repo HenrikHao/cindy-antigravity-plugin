@@ -213,7 +213,10 @@
   function harnessEntry(result) {
     var entry = { id: HARNESS_ID, available: result.available === true && !signInRequired };
     if (entry.available) entry.reportsUsage = true;
-    if (entry.available && supportsRemoteWorkspace(result.version)) entry.remoteWorkspace = true;
+    if (entry.available && supportsRemoteWorkspace(result.version)) {
+      entry.remoteWorkspace = true;
+      entry.guestWorkspace = true;
+    }
 
     if (result.available === true && signInRequired) {
       entry.reason = 'not-signed-in';

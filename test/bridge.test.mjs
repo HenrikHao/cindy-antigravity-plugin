@@ -512,8 +512,30 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     };
     assert.deepEqual(['1.5.12', '1.5.13', '1.6.0', '2.0.1'].map(versionSupported), [false, true, true, true]);
     for (const version of ['1.5.12', '1.5.13', '1.6.0', '2.0.1']) {
-      assert.equal((await published(version)).remoteWorkspace === true, versionSupported(version), version);
+      const entry = await published(version);
+      assert.equal(entry.remoteWorkspace === true, versionSupported(version), version);
+      assert.equal(entry.guestWorkspace === true, versionSupported(version), version);
     }
+  });
+
+  test('guest-workspace mode runs under the restricted agent and refuses session/list', async (t) => {
+    const launchFile = path.join(os.tmpdir(), `agy-acp-guest-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+    t.after(() => fs.rmSync(launchFile, { force: true }));
+    const fixture = makeFixture(t, { extraEnv: { FAKE_AGY_VERSION: '1.5.13', FAKE_AGY_LAUNCHFILE: launchFile } });
+    const bridge = startBridge(fixture.env, ['--cindy-remote-workspace', '--cindy-guest-workspace']);
+    t.after(() => bridge.child.kill());
+    const messages = () => bridge.stdout.text().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const send = (message) => bridge.child.stdin.write(JSON.stringify(message) + '\n');
+    const reply = async (id, what) => {
+      await waitFor(() => messages().some((m) => m.id === id && !m.method), 8_000, what);
+      return messages().find((m) => m.id === id && !m.method);
+    };
+    bridge.child.stdin.write(INITIALIZE);
+    await reply(0, 'initialize answer');
+    send({ jsonrpc: '2.0', id: 7, method: 'session/list', params: {} });
+    assert.equal((await reply(7, 'session/list refusal')).error.code, -32601);
+    bridge.child.stdin.end();
+    assert.equal((await bridge.closed).code, 0);
   });
 
   test('stopping agy-acp leaves no agy process behind', async (t) => {

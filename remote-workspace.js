@@ -39,6 +39,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const REMOTE_WORKSPACE_ARG = '--cindy-remote-workspace';
+const GUEST_WORKSPACE_ARG = '--cindy-guest-workspace';
 const AGENT_NAME = 'cindy-remote';
 /** The server that replaces the agent's own file and command tools; the task cannot run without it. */
 const EXEC_SERVER = 'cindy_exec';
@@ -77,8 +78,12 @@ function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isGuestWorkspaceLaunch(argv) {
+  return Array.isArray(argv) && argv.slice(2).includes(GUEST_WORKSPACE_ARG);
+}
+
 function isRemoteWorkspaceLaunch(argv) {
-  return Array.isArray(argv) && argv.slice(2).includes(REMOTE_WORKSPACE_ARG);
+  return Array.isArray(argv) && (argv.slice(2).includes(REMOTE_WORKSPACE_ARG) || argv.slice(2).includes(GUEST_WORKSPACE_ARG));
 }
 
 /** `1.5.13`, `agy 1.6.0-beta.2`, … at or above the checked version. Unreadable versions are not. */
@@ -544,6 +549,11 @@ function startRemoteWorkspace(agyPath, host) {
 
   const onClientLine = (line) => {
     if (finished || stopCode !== null) return;
+    const message = parseLine(line);
+    if (host.guest && message && message.method === 'session/list') {
+      if (message.id !== undefined) refuse(message.id, -32601, 'session/list is not available for shared sessions');
+      return;
+    }
     if (phase === 'session') {
       toAgentLine(line);
       return;
@@ -552,7 +562,6 @@ function startRemoteWorkspace(agyPath, host) {
       queued.push(line);
       return;
     }
-    const message = parseLine(line);
     if (!message || typeof message.method !== 'string') return;
     if (message.method === 'initialize' && message.id !== undefined && !initRequest) {
       startProbe(message, line);
@@ -609,12 +618,14 @@ function startRemoteWorkspace(agyPath, host) {
 module.exports = {
   AGENT_NAME,
   EXEC_SERVER,
+  GUEST_WORKSPACE_ARG,
   MIN_VERSION,
   REMOTE_WORKSPACE_ARG,
   REMOTE_WORKSPACE_EXIT_CODE,
   agentDefinition,
   completeInitializeResult,
   inspectToolCall,
+  isGuestWorkspaceLaunch,
   isRemoteWorkspaceLaunch,
   startRemoteWorkspace,
   usableServers,
