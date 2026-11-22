@@ -1033,3 +1033,46 @@ test('native /usage preserves exhausted groups and ignores model turns and disab
   ]);
   assert.equal(usageFromReport({ status: 'SUCCESS', num_turns: 1, command }), null);
 });
+
+describe('Antigravity steering relay', () => {
+  test('keeps the original ACP request open through successive native prompts', async () => {
+    const { PassThrough } = await import('node:stream');
+    const { default: steering } = await import('../agy-steering.js');
+    const source = new PassThrough();
+    const output = new PassThrough();
+    const child = { stdin: new PassThrough(), stdout: new PassThrough() };
+    const server = [];
+    const client = [];
+    child.stdin.on('data', (data) => server.push(JSON.parse(data)));
+    output.on('data', (data) => client.push(JSON.parse(data)));
+    steering.attachSteering(source, output, child, (error) => { throw error; });
+    const write = (stream, message) => stream.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
+    const request = (id, method, extra = {}) => write(source, { id, method, params: { sessionId: 'one', ...extra } });
+    const response = (id, result) => write(child.stdout, { id, result });
+    request(1, 'initialize');
+    response(1, { agentInfo: { name: 'Antigravity ACP Server', version: '1.5.14' }, _meta: { retained: true } });
+    assert.deepEqual(client.at(-1).result._meta, { retained: true, steering: { supported: true } });
+    const prompt = [{ type: 'text', text: 'Switch focus' }];
+    request(2, 'session/prompt', { prompt });
+    request(3, '_session/steering', { prompt });
+    const firstSteer = server.at(-1);
+    assert.equal(firstSteer.method, 'session/prompt');
+    assert.deepEqual(firstSteer.params, { sessionId: 'one', prompt });
+    assert.equal(client.at(-1).result.outcome, 'injected');
+    response(2, { stopReason: 'end_turn' });
+    assert.equal(client.some((message) => message.id === 2), false);
+    request(4, '_session/steering', { prompt });
+    const lastSteer = server.at(-1);
+    assert.notEqual(firstSteer.id, lastSteer.id);
+    response(firstSteer.id, { stopReason: 'end_turn' });
+    write(child.stdout, { method: 'session/update', params: { sessionId: 'one', update: { sessionUpdate: 'agent_message_chunk' } } });
+    assert.equal(client.at(-1).method, 'session/update');
+    response(lastSteer.id, { stopReason: 'end_turn', usage: { outputTokens: 7 } });
+    assert.deepEqual(client.at(-1), { jsonrpc: '2.0', id: 2, result: { stopReason: 'end_turn', usage: { outputTokens: 7 } } });
+    request(5, '_session/steering', { prompt });
+    assert.equal(client.at(-1).result.outcome, 'promptRequired');
+    assert.equal(server.at(-1).id, lastSteer.id);
+    source.end();
+    child.stdout.end();
+  });
+});

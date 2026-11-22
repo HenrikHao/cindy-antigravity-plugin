@@ -115,7 +115,7 @@ agy --settings {"useG1Credits":false} acp --disable-telemetry
 | `agy-client.js` | 插件自用的短时 ACP 连接（启动 agy、`initialize`、调用、停止） |
 | `agy-models.js` | 经 ACP 读取模型、每个模型的思考深度、agy 的工作模式与订阅档位 |
 | `agy-account.js` | 经 ACP 查询登录状态、用 Google 登录、取消登录、退出登录 |
-| `agy-acp.js` | ACP 引擎入口：启动 `agy acp`，双向原样转发 stdio |
+| `agy-acp.js` | ACP 引擎入口：启动 `agy acp`，双向转发 ACP，支持插话时转换请求 |
 | `remote-workspace.js` | 任务文件在另一台电脑时：受限 Agent 的定义、两段式启动，以及读懂 ACP 的转接 |
 | `settings.html` / `settings.js` | 设置页：检测结果、版本、位置、安装提示、账号（登录 / 退出）与「重新检测」 |
 | `locales/` | 清单名称与说明的英文、简体中文文案 |
@@ -128,6 +128,10 @@ agy --settings {"useG1Credits":false} acp --disable-telemetry
 `/opt/homebrew/bin`）。找到后运行 `agy --version`（10 秒超时）：能运行发布「可用」及版本，找不到发布
 `not-installed`，运行失败发布 `not-runnable`；读取模型时 agy 要求登录则发布 `not-signed-in`。发布给 Cindy 的
 只有状态、原因、提示、版本、模型与模式，不含路径或命令。
+
+## 插话
+
+支持插话的 Cindy 客户端可在本机 Antigravity CLI 1.5.0 或更新的 1.x 正式版任务运行中追加消息。插件将插话转成并发 ACP prompt，并保持原任务运行到最后一条回复结束。远程工作区仍按顺序排队。
 
 ## 发布新版本
 

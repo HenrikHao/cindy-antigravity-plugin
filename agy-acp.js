@@ -4,9 +4,9 @@
  * ACP engine entry for Cindy (`harnesses[].entry`).
  *
  * Cindy starts this file in raw-stdio mode, one process per task. It starts the
- * locally installed `agy acp` (session settings: no paid credits, no telemetry) and relays bytes unchanged:
+ * locally installed `agy acp` (session settings: no paid credits, no telemetry) and relays ACP, adapting steering on supported versions:
  *   stdin  -> agy stdin    (ACP JSON-RPC from Cindy)
- *   agy stdout -> stdout   (ACP JSON-RPC to Cindy; this file never writes stdout itself)
+ *   agy stdout -> stdout   (ACP JSON-RPC to Cindy)
  *   agy stderr -> stderr   (diagnostics, ends up in the plugin log)
  * When Cindy closes stdin, agy's stdin is closed and agy exits on its own; when agy
  * exits, this process exits with the same code. When this process is asked to stop,
@@ -19,6 +19,7 @@
  */
 
 const os = require('node:os');
+const { attachSteering } = require('./agy-steering.js');
 const { ACP_ARGS, detectAgy, resolveAgy, spawnAgy, killTree } = require('./resolve-agy.js');
 const remoteWorkspace = require('./remote-workspace.js');
 
@@ -73,7 +74,7 @@ function run(agyPath) {
     if (finished) return;
     finished = true;
     clearTimeout(forceTimer);
-    process.stdin.unpipe(child.stdin);
+    detachSteering();
     const done = () => process.exit(code);
     if (process.stdout.writableLength > 0) {
       process.stdout.once('drain', done);
@@ -125,12 +126,10 @@ function run(agyPath) {
     });
   });
 
-  // Byte-for-byte relay. No encoding is set anywhere, so chunks stay Buffers.
-  process.stdin.pipe(child.stdin);
+  const detachSteering = attachSteering(process.stdin, process.stdout, child, () => stop('SIGTERM'));
   child.stdin.on('error', () => {
     // EPIPE after agy exited; the exit handler takes care of shutting down.
   });
-  child.stdout.pipe(process.stdout, { end: false });
   child.stderr.pipe(process.stderr, { end: false });
 
   process.stdin.on('end', () => {
