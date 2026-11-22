@@ -30,6 +30,14 @@ const EXPECTED_ACP_ARGS = ['--settings', '{"useG1Credits":false}', 'acp', '--dis
 const FAKE_AGY_SOURCE = `'use strict';
 const fs = require('node:fs');
 const args = process.argv.slice(2);
+if (args.at(-1) === '/usage') {
+  if (process.env.FAKE_AGY_LAUNCHFILE) {
+    fs.writeFileSync(process.env.FAKE_AGY_LAUNCHFILE, process.env.AGY_CLI_DISABLE_AUTO_UPDATE ?? '');
+  }
+  const groups = [{ name: 'Test', buckets: [{ window: 'weekly', remaining_fraction: 0.5 }] }];
+  process.stdout.write(JSON.stringify({ status: 'SUCCESS', num_turns: 0, command: { name: 'usage', data: { groups } } }));
+  process.exit(0);
+}
 if (args.length === 1 && args[0] === '--version') {
   if (process.env.FAKE_AGY_BROKEN === '1') {
     process.stderr.write('agy requires Node.js >= 24.9.0\\n');
@@ -999,6 +1007,16 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     assert.equal(bridge.stdout.bytes().length, 0);
     assert.match(bridge.stderr.text(), /^\[agy-acp\] [^\n]*https:\/\/antigravity\.google[^\n]*\n$/);
   });
+});
+
+test('usage polling returns quota and skips CLI self-update on Windows', async (t) => {
+  const fixture = makeFixture(t, { extraEnv: { AGY_CLI_DISABLE_AUTO_UPDATE: 'false' } });
+  const launchFile = path.join(fixture.dir, 'usage-launch.txt');
+  const worker = startWorker({ ...fixture.env, FAKE_AGY_LAUNCHFILE: launchFile });
+  t.after(() => worker.close());
+  const { result } = await worker.call({ jsonrpc: '2.0', id: 1, method: 'usage' });
+  assert.deepEqual(result.windows, [{ label: 'Test · weekly', remainingPercent: 50 }]);
+  assert.equal(fs.readFileSync(launchFile, 'utf8'), isWin ? 'true' : 'false');
 });
 
 test('native /usage preserves exhausted groups and ignores model turns and disabled buckets', async () => {
