@@ -1,4 +1,4 @@
-// Run: node --test test/
+// Run: node --test
 //
 // Exercises the real entry files (worker.js, agy-acp.js) as child processes against
 // a fake `agy` placed on PATH (a Node script plus a `.cmd` wrapper on Windows or a
@@ -1034,21 +1034,110 @@ test('native /usage preserves exhausted groups and ignores model turns and disab
   assert.equal(usageFromReport({ status: 'SUCCESS', num_turns: 1, command }), null);
 });
 
-describe('Antigravity steering relay', () => {
-  test('keeps the original ACP request open through successive native prompts', async () => {
-    const { PassThrough } = await import('node:stream');
-    const { default: steering } = await import('../agy-steering.js');
-    const source = new PassThrough();
-    const output = new PassThrough();
-    const child = { stdin: new PassThrough(), stdout: new PassThrough() };
-    const server = [];
-    const client = [];
-    child.stdin.on('data', (data) => server.push(JSON.parse(data)));
-    output.on('data', (data) => client.push(JSON.parse(data)));
-    steering.attachSteering(source, output, child, (error) => { throw error; });
-    const write = (stream, message) => stream.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
-    const request = (id, method, extra = {}) => write(source, { id, method, params: { sessionId: 'one', ...extra } });
-    const response = (id, result) => write(child.stdout, { id, result });
+async function localRelay(t) {
+  const { PassThrough } = await import('node:stream');
+  const { default: steering } = await import('../agy-steering.js');
+  const source = new PassThrough();
+  const output = new PassThrough();
+  const child = { stdin: new PassThrough(), stdout: new PassThrough() };
+  const server = [];
+  const client = [];
+  child.stdin.on('data', (data) => server.push(JSON.parse(data)));
+  output.on('data', (data) => client.push(JSON.parse(data)));
+  steering.attachSteering(source, output, child, (error) => { throw error; });
+  const write = (stream, message) => stream.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
+  const request = (id, method, extra = {}) => write(source, { id, method, params: { sessionId: 'one', ...extra } });
+  const response = (id, result) => write(child.stdout, { id, result });
+  t.after(() => {
+    source.end();
+    child.stdout.end();
+  });
+  return { server, client, request, response, send: (message) => write(child.stdout, message) };
+}
+
+describe('Antigravity local ACP relay', () => {
+  test('adds HTTP MCP to Antigravity initialize and preserves capabilities and steering metadata', async (t) => {
+    const { client, request, response } = await localRelay(t);
+    const result = {
+      agentInfo: { name: 'Antigravity ACP Server', version: '1.5.14' },
+      agentCapabilities: { loadSession: true, mcpCapabilities: { http: false, sse: true } },
+      _meta: { antigravity: { tier: true }, steering: { retained: true } },
+    };
+    request(1, 'initialize');
+    response(1, result);
+    assert.deepEqual(client.at(-1).result, {
+      ...result,
+      agentCapabilities: { loadSession: true, mcpCapabilities: { http: true, sse: true } },
+      _meta: { antigravity: { tier: true }, steering: { retained: true, supported: true } },
+    });
+  });
+
+  test('advertises HTTP MCP even on an Antigravity version without steering', async (t) => {
+    const { client, request, response } = await localRelay(t);
+    request(1, 'initialize');
+    response(1, { agentInfo: { name: 'Antigravity ACP Server', version: '1.5.14-beta.1' } });
+    assert.deepEqual(client.at(-1).result.agentCapabilities, { mcpCapabilities: { http: true } });
+    assert.equal(client.at(-1).result._meta, undefined);
+  });
+
+  for (const method of ['session/new', 'session/resume', 'session/load']) {
+    test(`${method} restores MCP updates and permission requests and relays native tools unchanged`, async (t) => {
+      const { server, client, request, response, send } = await localRelay(t);
+      request(1, 'initialize');
+      response(1, { agentInfo: { name: 'Antigravity ACP Server', version: '1.5.14' } });
+      const mcpServers = ['cindy', 'cindy_helper'].map((name) => ({
+        type: 'http', name, url: `http://127.0.0.1:4711/mcp/${name}`, headers: [{ name: 'Authorization', value: 'Bearer test-token' }],
+      }));
+      request(2, method, { mcpServers });
+      assert.deepEqual(server.at(-1).params.mcpServers, mcpServers);
+
+      const rawInput = { category: 'control' };
+      const nested = method === 'session/resume';
+      const reportedInput = nested
+        ? { ServerName: 'cindy_helper', ToolName: 'list_tools', Arguments: JSON.stringify(rawInput) }
+        : { ...rawInput, toolSummary: 'List tools' };
+      const call = {
+        toolCallId: 'mcp-1',
+        name: nested ? 'call_mcp_tool' : 'mcp_cindy_helper_list_tools',
+        title: nested ? 'MCP Tool List Tools' : 'Run mcp_cindy_helper_list_tools',
+        kind: nested ? 'execute' : 'other',
+      };
+      const canonical = { ...call, name: 'mcp__cindy_helper__list_tools', title: 'mcp__cindy_helper__list_tools', kind: 'other', rawInput };
+      const update = (fields) => send({ method: 'session/update', params: { sessionId: 'one', update: fields } });
+      const options = [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }];
+      const permission = (toolCall) => send({
+        method: 'session/request_permission', id: 'perm', params: { sessionId: 'one', toolCall, options },
+      });
+
+      // Resume and load can replay tool updates before the response arrives.
+      if (method === 'session/new') response(2, { sessionId: 'one' });
+      update({ ...call, sessionUpdate: 'tool_call', rawInput: reportedInput, args: reportedInput });
+      assert.deepEqual(client.at(-1).params.update, { ...canonical, sessionUpdate: 'tool_call' });
+      if (method !== 'session/new') response(2, {});
+      permission({ ...call, rawInput: reportedInput, args: reportedInput });
+      assert.deepEqual(client.at(-1).params, { sessionId: 'one', toolCall: canonical, options });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: call.toolCallId, title: call.title, status: 'completed' });
+      assert.deepEqual(client.at(-1).params.update,
+        { sessionUpdate: 'tool_call_update', toolCallId: call.toolCallId, title: canonical.title, status: 'completed' });
+
+      const unchanged = [
+        { toolCallId: 'native-1', name: 'run_command', title: 'Run command', kind: 'execute', rawInput: { command: 'echo relay-test' } },
+        { toolCallId: 'native-2', name: 'write_to_file', title: 'Write file', kind: 'edit', rawInput: { path: 'file.txt', content: 'probe' } },
+        { toolCallId: 'untracked-1', name: 'mcp_other_server_list_tools', title: 'Run other tool', kind: 'other', rawInput: reportedInput },
+        { toolCallId: 'untracked-2', name: 'call_mcp_tool', title: 'MCP Tool List Tools', kind: 'other',
+          rawInput: { ServerName: 'other_server', ToolName: 'list_tools', Arguments: rawInput } },
+      ];
+      for (const toolCall of unchanged) {
+        permission(toolCall);
+        assert.deepEqual(client.at(-1).params.toolCall, toolCall);
+        update({ ...toolCall, sessionUpdate: 'tool_call' });
+        assert.deepEqual(client.at(-1).params.update, { ...toolCall, sessionUpdate: 'tool_call' });
+      }
+    });
+  }
+
+  test('keeps the original ACP request open through successive native prompts', async (t) => {
+    const { server, client, request, response, send } = await localRelay(t);
     request(1, 'initialize');
     response(1, { agentInfo: { name: 'Antigravity ACP Server', version: '1.5.14' }, _meta: { retained: true } });
     assert.deepEqual(client.at(-1).result._meta, { retained: true, steering: { supported: true } });
@@ -1065,14 +1154,12 @@ describe('Antigravity steering relay', () => {
     const lastSteer = server.at(-1);
     assert.notEqual(firstSteer.id, lastSteer.id);
     response(firstSteer.id, { stopReason: 'end_turn' });
-    write(child.stdout, { method: 'session/update', params: { sessionId: 'one', update: { sessionUpdate: 'agent_message_chunk' } } });
+    send({ method: 'session/update', params: { sessionId: 'one', update: { sessionUpdate: 'agent_message_chunk' } } });
     assert.equal(client.at(-1).method, 'session/update');
     response(lastSteer.id, { stopReason: 'end_turn', usage: { outputTokens: 7 } });
     assert.deepEqual(client.at(-1), { jsonrpc: '2.0', id: 2, result: { stopReason: 'end_turn', usage: { outputTokens: 7 } } });
     request(5, '_session/steering', { prompt });
     assert.equal(client.at(-1).result.outcome, 'promptRequired');
     assert.equal(server.at(-1).id, lastSteer.id);
-    source.end();
-    child.stdout.end();
   });
 });

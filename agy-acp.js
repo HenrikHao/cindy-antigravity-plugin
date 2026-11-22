@@ -4,7 +4,8 @@
  * ACP engine entry for Cindy (`harnesses[].entry`).
  *
  * Cindy starts this file in raw-stdio mode, one process per task. It starts the
- * locally installed `agy acp` (session settings: no paid credits, no telemetry) and relays ACP, adapting steering on supported versions:
+ * locally installed `agy acp` (session settings: no paid credits, no telemetry) and relays ACP,
+ * adapting Antigravity's HTTP MCP support and adding steering on compatible versions.
  *   stdin  -> agy stdin    (ACP JSON-RPC from Cindy)
  *   agy stdout -> stdout   (ACP JSON-RPC to Cindy)
  *   agy stderr -> stderr   (diagnostics, ends up in the plugin log)

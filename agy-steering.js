@@ -2,6 +2,7 @@
 
 const { Transform } = require('node:stream');
 const { StringDecoder } = require('node:string_decoder');
+const { completeInitializeResult, isObject, isSessionOpen, normalizeMcpToolCall } = require('./agy-mcp.js');
 
 function lineTransform(handle) {
   const decoder = new StringDecoder('utf8');
@@ -40,9 +41,8 @@ function parse(line) {
   try { return JSON.parse(line); } catch { return null; }
 }
 
-function supportsSteering(info) {
-  if (info?.name !== 'Antigravity ACP Server') return false;
-  const version = /^1\.(\d+)\.\d+$/.exec(info.version);
+function supportsSteering(agentVersion) {
+  const version = /^1\.(\d+)\.\d+$/.exec(agentVersion);
   return !!version && Number(version[1]) >= 5;
 }
 
@@ -54,22 +54,53 @@ function supportsSteering(info) {
 function attachSteering(input, output, child, stop) {
   const turns = new Map();
   const requests = new Map();
+  const openingSessions = new Map();
+  const mcpSessions = new Map();
   let nextSteerId = 0;
   let initializeId;
+  let isAntigravity = false;
   let offered = false;
+
+  function normalizeToolMessage(message) {
+    const { method, params } = message;
+    const updateKind = params?.update?.sessionUpdate;
+    let key;
+    if (method === 'session/request_permission' && message.id !== undefined) key = 'toolCall';
+    if (method === 'session/update' && (updateKind === 'tool_call' || updateKind === 'tool_call_update')) key = 'update';
+    if (!key || typeof params?.sessionId !== 'string') return null;
+    const { sessionId } = params;
+    // agy can replay updates while it loads a known session, before its open response.
+    const opening = [...openingSessions.values()].find((session) => session.sessionId === sessionId);
+    const session = opening ?? mcpSessions.get(sessionId);
+    if (!session) return null;
+    const toolCall = normalizeMcpToolCall(params[key], session.seen, session.serverNames);
+    return toolCall ? { ...message, params: { ...params, [key]: toolCall } } : null;
+  }
 
   const toClient = lineTransform((line) => {
     const message = parse(line);
-    if (!message || message.method || message.id === undefined) return line;
+    if (!message) return line;
+    if (message.method) {
+      const normalized = isAntigravity && normalizeToolMessage(message);
+      return normalized ? encode(normalized) : line;
+    }
+    if (message.id === undefined) return line;
     if (message.id === initializeId) {
       initializeId = undefined;
-      if (supportsSteering(message.result?.agentInfo)) {
-        offered = true;
-        const result = message.result;
-        return encode({ ...message, result: { ...result, _meta: {
-          ...result._meta, steering: { ...result._meta?.steering, supported: true },
-        } } });
+      const { agentInfo } = message.result ?? {};
+      isAntigravity = agentInfo?.name === 'Antigravity ACP Server';
+      if (isAntigravity) {
+        const result = completeInitializeResult(message.result);
+        offered = supportsSteering(agentInfo.version);
+        if (offered) result._meta = { ...result._meta, steering: { ...result._meta?.steering, supported: true } };
+        return encode({ ...message, result });
       }
+    }
+    const opening = openingSessions.get(message.id);
+    if (opening) {
+      openingSessions.delete(message.id);
+      const sessionId = opening.sessionId ?? message.result?.sessionId;
+      if (isObject(message.result) && typeof sessionId === 'string') mcpSessions.set(sessionId, opening);
     }
 
     const turn = requests.get(message.id);
@@ -86,6 +117,11 @@ function attachSteering(input, output, child, stop) {
     if (!message?.method || message.id === undefined) return line;
     const params = message.params;
     if (message.method === 'initialize') initializeId = message.id;
+    if (isAntigravity && isSessionOpen(message.method)) {
+      const servers = Array.isArray(params?.mcpServers) ? params.mcpServers : [];
+      const serverNames = servers.map((server) => server?.name).filter((name) => typeof name === 'string' && name);
+      openingSessions.set(message.id, { sessionId: params?.sessionId, serverNames, seen: new Map() });
+    }
     if (!offered) return line;
     if (message.method === 'session/prompt' && typeof params?.sessionId === 'string' && !turns.has(params.sessionId)) {
       const turn = { sessionId: params.sessionId, originalId: message.id, latestId: message.id, pending: 1 };

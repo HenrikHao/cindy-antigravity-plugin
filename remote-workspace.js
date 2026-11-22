@@ -37,6 +37,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { completeInitializeResult, isObject, isSessionOpen, normalizeMcpToolCall } = require('./agy-mcp.js');
 
 const REMOTE_WORKSPACE_ARG = '--cindy-remote-workspace';
 const GUEST_WORKSPACE_ARG = '--cindy-guest-workspace';
@@ -50,7 +51,6 @@ const SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MAX_SERVERS = 64;
 /** Remote-workspace mode could not be established, or was broken by the agent; agy is not left running. */
 const REMOTE_WORKSPACE_EXIT_CODE = 78;
-const MAX_TRACKED_CALLS = 2_000;
 const LAUNCH_DIR_PREFIX = 'cindy-agy-remote-';
 /** A launch directory this old belongs to a task that ended without cleaning up (a crash, a hard kill). */
 const STALE_LAUNCH_DIR_MS = 24 * 60 * 60 * 1000;
@@ -73,10 +73,6 @@ const STOPPED_MESSAGE =
   'Antigravity 试图使用这台电脑上的工具，任务已停止。这个任务的文件在另一台电脑上，它只能使用那台电脑提供的工具。\n\n'
   + 'Antigravity tried to use a tool on this computer, so the task was stopped. '
   + "This task's files are on another computer; it may only use the tools that computer provides.";
-
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
 
 function isGuestWorkspaceLaunch(argv) {
   return Array.isArray(argv) && argv.slice(2).includes(GUEST_WORKSPACE_ARG);
@@ -169,18 +165,6 @@ function writeAgentDefinition(dir, serverNames) {
   fs.writeFileSync(path.join(agents, `${AGENT_NAME}.md`), agentDefinition(serverNames), 'utf8');
 }
 
-/** agy connects to HTTP MCP servers without declaring it; Cindy only hands tools to an agent that does. */
-function completeInitializeResult(result) {
-  if (!isObject(result)) return result;
-  const capabilities = isObject(result.agentCapabilities) ? result.agentCapabilities : {};
-  const mcp = isObject(capabilities.mcpCapabilities) ? capabilities.mcpCapabilities : {};
-  return { ...result, agentCapabilities: { ...capabilities, mcpCapabilities: { ...mcp, http: true } } };
-}
-
-function isSessionOpen(method) {
-  return method === 'session/new' || method === 'session/load' || method === 'session/resume';
-}
-
 /** The HTTP MCP servers of a session request that the agent can be given, in order, by unique name. */
 function usableServers(params) {
   const list = isObject(params) && Array.isArray(params.mcpServers) ? params.mcpServers : [];
@@ -196,80 +180,17 @@ function usableServers(params) {
   return { servers, dropped };
 }
 
-function mcpArguments(input) {
-  const value = input.Arguments;
-  if (isObject(value)) return value;
-  if (typeof value === 'string' && value.trim()) {
-    try {
-      const parsed = JSON.parse(value);
-      return isObject(parsed) ? parsed : { value: parsed };
-    } catch {
-      return { value };
-    }
-  }
-  return {};
+function remoteToolIdentity({ server, tool }) {
+  if (server === EXEC_SERVER) return { title: tool, kind: EXEC_TOOL_KINDS[tool] || 'other' };
 }
 
-/** `mcp_cindy_exec_Bash` → { server: 'cindy_exec', tool: 'Bash' } for one of the session's servers, else null. */
-function directMcpTool(name, serverNames) {
-  if (typeof name !== 'string' || !name.startsWith('mcp_')) return null;
-  let found = null;
-  for (const server of serverNames) {
-    const prefix = `mcp_${server.replace(/[^A-Za-z0-9_]/g, '_')}_`;
-    if (name.startsWith(prefix) && name.length > prefix.length && (!found || server.length > found.server.length)) {
-      found = { server, tool: name.slice(prefix.length) };
-    }
-  }
-  return found;
-}
-
-/**
- * Looks at one tool call (a `tool_call` / `tool_call_update` update, or the call of a permission
- * request) and says what it is:
- *  - `mcp`: a call of an MCP tool, in either form agy reports it (the generic caller with the real
- *    arguments nested, or a tool named `mcp_<server>_<tool>`). `toolCall` is the same call written
- *    the way Cindy shows and checks tools: Cindy's file and command tools by their own name and
- *    arguments, others as `mcp__server__tool`.
- *  - `local`: one of agy's own tools that reads, changes or runs something on this computer.
- *  - `other`: anything else, passed on as it is.
- * `seen` remembers MCP calls by id, so a later update without arguments keeps its name;
- * `serverNames` are the MCP servers of the session.
- */
+/** Keep the remote restriction on native file and command tools after normalizing MCP calls. */
 function inspectToolCall(toolCall, seen, serverNames = []) {
   if (!isObject(toolCall)) return { type: 'other' };
-  const id = typeof toolCall.toolCallId === 'string' ? toolCall.toolCallId : null;
-  const input = toolCall.rawInput;
-  const nested = isObject(input) && typeof input.ServerName === 'string' && typeof input.ToolName === 'string'
-    ? { server: input.ServerName, tool: input.ToolName }
-    : null;
-  const direct = nested ? null : directMcpTool(toolCall.name, serverNames);
-  const call = nested || direct;
-  let known = id ? seen.get(id) : undefined;
-  if (call) {
-    const exec = call.server === EXEC_SERVER;
-    known = {
-      title: exec ? call.tool : `mcp__${call.server}__${call.tool}`,
-      kind: exec ? (EXEC_TOOL_KINDS[call.tool] || 'other') : 'other',
-    };
-    if (id) {
-      if (seen.size >= MAX_TRACKED_CALLS && !seen.has(id)) seen.delete(seen.keys().next().value);
-      seen.set(id, known);
-    }
-  }
-  if (known) {
-    const next = { ...toolCall };
-    if ('title' in next) next.title = known.title;
-    if ('name' in next) next.name = known.title;
-    if ('kind' in next) next.kind = known.kind;
-    if (nested) next.rawInput = mcpArguments(input);
-    else if (direct && isObject(input)) {
-      // agy adds its own one-line summary to every direct call; it is not an argument of the tool.
-      const { toolSummary: _summary, ...rest } = input;
-      next.rawInput = rest;
-    }
-    if (isObject(next.args) && (typeof next.args.ServerName === 'string' || direct)) delete next.args;
-    return { type: 'mcp', toolCall: next };
-  }
+  const mcpCall = normalizeMcpToolCall(toolCall, seen, serverNames, {
+    allowLegacyEnvelope: true, toolIdentity: remoteToolIdentity,
+  });
+  if (mcpCall) return { type: 'mcp', toolCall: mcpCall };
   const name = typeof toolCall.name === 'string' ? toolCall.name : '';
   const kind = typeof toolCall.kind === 'string' ? toolCall.kind : '';
   if (LOCAL_TOOL_NAMES.has(name) || LOCAL_KINDS.has(kind)) return { type: 'local', tool: name || kind };
