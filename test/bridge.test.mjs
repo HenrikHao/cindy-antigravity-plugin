@@ -1196,6 +1196,27 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     // A real address chosen by the user is never replaced.
     const custom = 'unix:path=/somewhere/else';
     assert.equal(linux({ XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: custom }).DBUS_SESSION_BUS_ADDRESS, custom);
+    // Cindy drops XDG_RUNTIME_DIR too: fall back to /run/user/<uid>/bus and fill it in for agy.
+    const uid = process.getuid();
+    const defaultRuntime = `/run/user/${uid}`;
+    const defaultBus = `${defaultRuntime}/bus`;
+    const realStatSync = fs.statSync;
+    let defaultBusIsSocket = true;
+    t.mock.method(fs, 'statSync', function (file, ...rest) {
+      if (file !== defaultBus) return realStatSync.call(this, file, ...rest);
+      if (!defaultBusIsSocket) throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+      return { isSocket: () => true, isFile: () => false, isDirectory: () => false };
+    });
+    for (const env of [{}, { DBUS_SESSION_BUS_ADDRESS: 'disabled:' }]) {
+      const out = linux(env);
+      assert.equal(out.DBUS_SESSION_BUS_ADDRESS, `unix:path=${defaultBus}`);
+      assert.equal(out.XDG_RUNTIME_DIR, defaultRuntime);
+    }
+    defaultBusIsSocket = false;
+    const noDefaultBus = linux({ DBUS_SESSION_BUS_ADDRESS: 'disabled:' });
+    assert.equal('DBUS_SESSION_BUS_ADDRESS' in noDefaultBus, false);
+    assert.equal('XDG_RUNTIME_DIR' in noDefaultBus, false);
+    t.mock.restoreAll();
     // Windows environments are left alone.
     const win = childEnv('C:\\agy\\agy.exe', { platform: 'win32', env: { PATH: 'C:\\Windows', DBUS_SESSION_BUS_ADDRESS: 'disabled:' } });
     assert.equal(win.DBUS_SESSION_BUS_ADDRESS, 'disabled:');
