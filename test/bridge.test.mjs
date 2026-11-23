@@ -1169,6 +1169,38 @@ describe('agy-acp plugin', { concurrency: true, timeout: 20_000 }, () => {
     }
   });
 
+  test('childEnv points agy at the session bus when Cindy passes DBUS_SESSION_BUS_ADDRESS=disabled:', { skip: isWin }, async (t) => {
+    const net = await import('node:net');
+    const { childEnv } = await import(pathToFileURL(path.join(root, 'resolve-agy.js')).href);
+    const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-bus-'));
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-nobus-'));
+    const bus = path.join(runtime, 'bus');
+    const server = net.createServer();
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(bus, resolve); });
+    t.after(() => {
+      server.close();
+      fs.rmSync(runtime, { recursive: true, force: true });
+      fs.rmSync(empty, { recursive: true, force: true });
+    });
+    const agyPath = '/opt/agy/bin/agy';
+    const base = { HOME: '/home/u', PATH: '/usr/bin' };
+    const linux = (env) => childEnv(agyPath, { platform: 'linux', env: { ...base, ...env } });
+
+    // Electron's utility process sets `disabled:`: agy gets the real socket instead.
+    assert.equal(linux({ XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: 'disabled:' }).DBUS_SESSION_BUS_ADDRESS, `unix:path=${bus}`);
+    // Missing address (Cindy's allowlist drops it): the same socket.
+    assert.equal(linux({ XDG_RUNTIME_DIR: runtime }).DBUS_SESSION_BUS_ADDRESS, `unix:path=${bus}`);
+    // No socket: drop `disabled:` so agy can fall back to its own discovery.
+    const noSocket = linux({ XDG_RUNTIME_DIR: empty, DBUS_SESSION_BUS_ADDRESS: 'disabled:' });
+    assert.equal('DBUS_SESSION_BUS_ADDRESS' in noSocket, false);
+    // A real address chosen by the user is never replaced.
+    const custom = 'unix:path=/somewhere/else';
+    assert.equal(linux({ XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: custom }).DBUS_SESSION_BUS_ADDRESS, custom);
+    // Windows environments are left alone.
+    const win = childEnv('C:\\agy\\agy.exe', { platform: 'win32', env: { PATH: 'C:\\Windows', DBUS_SESSION_BUS_ADDRESS: 'disabled:' } });
+    assert.equal(win.DBUS_SESSION_BUS_ADDRESS, 'disabled:');
+  });
+
   test('main.js discards stale detect/listModels from the old binary, refreshes usage, and never leaks paths', async () => {
     class Channel {
       static all = [];
