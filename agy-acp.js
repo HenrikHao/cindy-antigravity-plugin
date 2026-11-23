@@ -77,12 +77,15 @@ function run(agyPath) {
     clearTimeout(forceTimer);
     detachSteering();
     const done = () => process.exit(code);
-    if (process.stdout.writableLength > 0) {
-      process.stdout.once('drain', done);
-      setTimeout(done, FLUSH_TIMEOUT_MS);
-    } else {
-      done();
-    }
+    const flushStdout = () => {
+      if (process.stdout.writableLength > 0) process.stdout.write('', done);
+      else done();
+    };
+    setTimeout(done, FLUSH_TIMEOUT_MS);
+    // When agy exits by itself, Cindy gets everything it wrote first: part of it can still be
+    // inside the relay. After a stop nobody is waiting for it any more.
+    if (stopCode !== null || stdoutRelay.readableEnded) flushStdout();
+    else stdoutRelay.once('end', flushStdout);
   };
 
   const terminate = () => {
@@ -127,7 +130,7 @@ function run(agyPath) {
     });
   });
 
-  const detachSteering = attachSteering(process.stdin, process.stdout, child, () => stop('SIGTERM'));
+  const { detach: detachSteering, relay: stdoutRelay } = attachSteering(process.stdin, process.stdout, child, () => stop('SIGTERM'));
   child.stdin.on('error', () => {
     // EPIPE after agy exited; the exit handler takes care of shutting down.
   });
